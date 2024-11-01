@@ -4,7 +4,7 @@ import random
 import socket
 import threading
 import json
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel, QListWidget, QComboBox, QTextEdit
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel, QListWidget, QComboBox, QTextEdit, QInputDialog
 from PyQt5.QtCore import Qt
 
 class ChatWindow(QMainWindow):
@@ -14,12 +14,14 @@ class ChatWindow(QMainWindow):
         self.setGeometry(100, 100, 600, 500)
         
         self.mac_id = self.load_or_generate_mac()
+        self.user_name = self.load_or_request_name()
         self.message_history_file = f"{self.mac_id}_history.txt"
-        
+        self.nome_para_mac = {}
+
         # Conectar ao servidor
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.client_socket.connect(('127.0.0.1', 12345))
-        self.client_socket.sendall((self.mac_id + '\n').encode())
+        self.client_socket.sendall((json.dumps({"type": "register", "mac": self.mac_id, "name": self.user_name}) + '\n').encode())
         
         # Criar a interface
         self.initUI()
@@ -83,6 +85,19 @@ class ChatWindow(QMainWindow):
             file.write(mac_id)
         return mac_id
 
+    def load_or_request_name(self):
+        name_file = "user_name.txt"
+        if os.path.exists(name_file):
+            with open(name_file, "r") as file:
+                return file.read().strip()
+        
+        name, ok = QInputDialog.getText(self, "Nome de Usuário", "Digite seu nome:")
+        if ok and name:
+            with open(name_file, "w") as file:
+                file.write(name)
+            return name
+        return "Usuário"
+
     def load_message_history(self):
         if os.path.exists(self.message_history_file):
             with open(self.message_history_file, "r") as file:
@@ -95,10 +110,11 @@ class ChatWindow(QMainWindow):
 
     def send_message(self):
         message = self.message_input.text()
-        dest_mac = self.dest_selector.currentText()
+        dest_name = self.dest_selector.currentText()
+        dest_mac = self.nome_para_mac.get(dest_name, "")
         
         if message and dest_mac:
-            display_text = f"Você ({self.mac_id}): {message}"
+            display_text = f"Você: {message}"
             self.display_message(display_text, True)
             self.save_message(display_text)
             
@@ -109,8 +125,10 @@ class ChatWindow(QMainWindow):
 
     def display_message(self, message, is_self=False):
         if is_self:
+            # Alinha mensagens enviadas à direita
             self.message_display.append(f"<p style='color:blue; text-align:right;'>{message}</p>")
         else:
+            # Alinha mensagens recebidas à esquerda
             self.message_display.append(f"<p style='color:green; text-align:left;'>{message}</p>")
 
     def receive_messages(self):
@@ -137,7 +155,8 @@ class ChatWindow(QMainWindow):
         
         # Processa mensagens diretas
         elif data["type"] == "message":
-            display_text = f"{data['sender']}: {data['content']}"
+            sender_name = next((name for name, mac in self.nome_para_mac.items() if mac == data["sender"]), data["sender"])
+            display_text = f"{sender_name}: {data['content']}"
             self.display_message(display_text)
             self.save_message(display_text)
 
@@ -146,9 +165,10 @@ class ChatWindow(QMainWindow):
         self.dest_selector.clear()
         
         for client in clients:
-            if client != self.mac_id:  # Exibir todos os outros clientes
-                self.client_list_widget.addItem(client)
-                self.dest_selector.addItem(client)
+            if client["mac"] != self.mac_id:
+                self.client_list_widget.addItem(client["name"])
+                self.dest_selector.addItem(client["name"])
+                self.nome_para_mac[client["name"]] = client["mac"]
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
