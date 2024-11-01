@@ -2,12 +2,18 @@ import socket
 import threading
 import os
 import json
+import time
 
 # Configuração do servidor
 HOST = '127.0.0.1'
 PORT = 12345
 clientes = {}
 cliente_status_file = "clientes_registrados.txt"
+palavras_proibidas = ["Tomate Cru", "Mexilhões", "Molho Tartaro", "Faz o L", "Xandao"]
+strikes = {}
+strike_timer = {}
+STRIKE_LIMIT = 3
+STRIKE_TIME_LIMIT = 60  # em segundos
 
 def register_mac(mac_id):
     if not os.path.exists(cliente_status_file):
@@ -21,8 +27,19 @@ def register_mac(mac_id):
     with open(cliente_status_file, "a") as file:
         file.write(f"{mac_id} True\n")
 
+def update_client_status(mac_id, status):
+    # Atualiza o status do cliente no arquivo
+    lines = []
+    with open(cliente_status_file, "r") as file:
+        lines = file.readlines()
+
+    with open(cliente_status_file, "w") as file:
+        for line in lines:
+            if line.startswith(mac_id):
+                line = f"{mac_id} {status}\n"
+            file.write(line)
+
 def send_client_list():
-    # Enviar a lista de clientes conectados para todos os clientes
     client_list = [{"mac": mac_id, "name": client_data["name"]} for mac_id, client_data in clientes.items()]
     message = json.dumps({"type": "client_list", "clients": client_list}) + '\n'
     for client_data in clientes.values():
@@ -32,7 +49,7 @@ def handle_client(conn, addr):
     buffer = ''
     mac_id = ''
     name = ''
-
+    
     # Receber o registro de nome e MAC do cliente
     try:
         data = conn.recv(1024).decode()
@@ -53,6 +70,18 @@ def handle_client(conn, addr):
 
     register_mac(mac_id)
     clientes[mac_id] = {"conn": conn, "name": name}
+    strikes[mac_id] = 0
+    strike_timer[mac_id] = 0
+
+    # Verificar se o usuário já está banido ao iniciar
+    with open(cliente_status_file, "r") as file:
+        for line in file:
+            if line.startswith(mac_id):
+                _, status = line.strip().split()
+                if status == "False":
+                    strikes[mac_id] = STRIKE_LIMIT  # Marcar como banido
+                    break
+
     print(f"{name} ({mac_id}) conectado a partir de {addr}")
 
     # Enviar lista de clientes para todos
@@ -70,14 +99,52 @@ def handle_client(conn, addr):
                 data_json = json.loads(message)
                 if data_json["type"] == "message":
                     dest_mac = data_json["dest"]
-                    if dest_mac in clientes:
+                    # Verificar se o usuário está banido
+                    if strikes[mac_id] >= STRIKE_LIMIT:
+                        # Avisar usuário que ele foi banido
+                        ban_message = json.dumps({
+                            "type": "ban",
+                            "content": "(Servidor): Devido a violações de nossos termos de uso, sua conta foi banida permanentemente."
+                        }) + '\n'
+                        conn.sendall(ban_message.encode())
+                        continue
+
+                    # Verificar por palavras proibidas
+                    conteudo_mensagem = data_json["content"]
+                    for palavra in palavras_proibidas:
+                        if palavra in conteudo_mensagem:
+                            strikes[mac_id] += 1
+                            if strikes[mac_id] == 1:
+                                strike_timer[mac_id] = time.time()  # Começar o contador
+                            break
+                    else:
+                        strikes[mac_id] = 0  # Resetar strikes se nenhuma palavra proibida foi encontrada
+
+                    # Se o contador de strikes estiver ativo, verificar se ainda está dentro do limite de tempo
+                    if strikes[mac_id] > 0 and time.time() - strike_timer[mac_id] > STRIKE_TIME_LIMIT:
+                        strikes[mac_id] = 0  # Resetar strikes após 1 minuto
+
+                    # Se o usuário for banido
+                    if strikes[mac_id] >= STRIKE_LIMIT:
+                        update_client_status(mac_id, "False")  # Atualiza o status para banido
+                        # Avisar usuário que ele foi banido
+                        ban_message = json.dumps({
+                            "type": "ban",
+                            "content": "(Servidor): Devido a violações de nossos termos de uso, sua conta foi banida permanentemente."
+                        }) + '\n'
+                        conn.sendall(ban_message.encode())
+                        continue
+
+                    # Enviar a mensagem se não houver banimento
+                    if dest_mac in clientes and strikes[dest_mac] < STRIKE_LIMIT:  # Verificar se destinatário não está banido
                         msg_to_send = json.dumps({
                             "type": "message",
                             "sender": mac_id,
-                            "content": data_json["content"]
+                            "content": conteudo_mensagem
                         }) + '\n'
                         clientes[dest_mac]["conn"].sendall(msg_to_send.encode())
-        except:
+        except Exception as e:
+            print(f"Erro ao processar mensagem: {e}")
             break
 
     # Remover cliente desconectado
