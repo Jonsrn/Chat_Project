@@ -23,33 +23,37 @@ def register_mac(mac_id):
 
 def send_client_list():
     # Enviar a lista de clientes conectados para todos os clientes
-    connected_clients = list(clientes.keys())
-    message = json.dumps({"type": "client_list", "clients": connected_clients}) + '\n'
-    for client_conn in clientes.values():
-        client_conn.sendall(message.encode())
+    client_list = [{"mac": mac_id, "name": client_data["name"]} for mac_id, client_data in clientes.items()]
+    message = json.dumps({"type": "client_list", "clients": client_list}) + '\n'
+    for client_data in clientes.values():
+        client_data["conn"].sendall(message.encode())
 
 def handle_client(conn, addr):
-    mac_id = ''
     buffer = ''
-    while True:
-        try:
-            data = conn.recv(1024).decode()
-            if not data:
-                break
-            buffer += data
-            if '\n' in buffer:
-                mac_id, buffer = buffer.split('\n', 1)
-                break
-        except:
-            break
+    mac_id = ''
+    name = ''
 
-    if not mac_id:
+    # Receber o registro de nome e MAC do cliente
+    try:
+        data = conn.recv(1024).decode()
+        buffer += data
+        if '\n' in buffer:
+            registration, buffer = buffer.split('\n', 1)
+            registration_data = json.loads(registration)
+            mac_id = registration_data["mac"]
+            name = registration_data["name"]
+    except Exception as e:
+        print(f"Erro ao registrar cliente: {e}")
+        conn.close()
+        return
+
+    if not mac_id or not name:
         conn.close()
         return
 
     register_mac(mac_id)
-    clientes[mac_id] = conn
-    print(f"{mac_id} conectado a partir de {addr}")
+    clientes[mac_id] = {"conn": conn, "name": name}
+    print(f"{name} ({mac_id}) conectado a partir de {addr}")
 
     # Enviar lista de clientes para todos
     send_client_list()
@@ -72,7 +76,7 @@ def handle_client(conn, addr):
                             "sender": mac_id,
                             "content": data_json["content"]
                         }) + '\n'
-                        clientes[dest_mac].sendall(msg_to_send.encode())
+                        clientes[dest_mac]["conn"].sendall(msg_to_send.encode())
         except:
             break
 
@@ -80,21 +84,18 @@ def handle_client(conn, addr):
     conn.close()
     if mac_id in clientes:
         del clientes[mac_id]
-    print(f"{mac_id} desconectado")
+    print(f"{name} ({mac_id}) desconectado")
 
     # Atualizar a lista de clientes e enviar para todos
     send_client_list()
 
-def start_server():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((HOST, PORT))
-    server.listen()
-    print("Servidor iniciado, aguardando conexões...")
+# Configurar e iniciar o servidor
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+    server_socket.bind((HOST, PORT))
+    server_socket.listen()
+    print("Servidor rodando...")
 
     while True:
-        conn, addr = server.accept()
-        thread = threading.Thread(target=handle_client, args=(conn, addr))
-        thread.start()
-
-if __name__ == "__main__":
-    start_server()
+        conn, addr = server_socket.accept()
+        client_thread = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
+        client_thread.start()
