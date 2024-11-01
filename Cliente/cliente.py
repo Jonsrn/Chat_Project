@@ -4,7 +4,7 @@ import random
 import socket
 import threading
 import json
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel, QListWidget, QComboBox, QTextEdit, QInputDialog
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel, QListWidget, QTextEdit, QTabWidget, QInputDialog
 from PyQt5.QtCore import Qt
 
 class ChatWindow(QMainWindow):
@@ -15,8 +15,12 @@ class ChatWindow(QMainWindow):
         
         self.mac_id = self.load_or_generate_mac()
         self.user_name = self.load_or_request_name()
-        self.message_history_file = f"{self.mac_id}_history.txt"
+        self.message_history_dir = "chat_histories"
+        os.makedirs(self.message_history_dir, exist_ok=True)
         self.nome_para_mac = {}
+        self.active_chat = None
+        self.unread_messages = {}
+        self.pending_messages = {}  # Dicionário para armazenar mensagens não lidas
 
         # Conectar ao servidor
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -25,7 +29,6 @@ class ChatWindow(QMainWindow):
         
         # Criar a interface
         self.initUI()
-        self.load_message_history()
 
         # Thread para receber mensagens continuamente
         self.receive_thread = threading.Thread(target=self.receive_messages, daemon=True)
@@ -40,6 +43,7 @@ class ChatWindow(QMainWindow):
         client_label = QLabel("Usuários Online:")
         client_label.setAlignment(Qt.AlignCenter)
         self.client_list_widget = QListWidget()
+        self.client_list_widget.itemClicked.connect(self.change_chat)
         left_layout.addWidget(client_label)
         left_layout.addWidget(self.client_list_widget)
         main_layout.addLayout(left_layout, 1)
@@ -47,18 +51,10 @@ class ChatWindow(QMainWindow):
         # Área de mensagens e entrada
         right_layout = QVBoxLayout()
 
-        # Área de exibição das mensagens
-        self.message_display = QTextEdit()
-        self.message_display.setReadOnly(True)
-        right_layout.addWidget(self.message_display, 4)
-
-        # Selecionar destinatário
-        dest_layout = QHBoxLayout()
-        dest_label = QLabel("Enviar para:")
-        self.dest_selector = QComboBox()
-        dest_layout.addWidget(dest_label)
-        dest_layout.addWidget(self.dest_selector)
-        right_layout.addLayout(dest_layout)
+        # Área de exibição das abas de conversa
+        self.chat_tabs = QTabWidget()
+        self.chat_tabs.currentChanged.connect(self.switch_tab)
+        right_layout.addWidget(self.chat_tabs, 4)
 
         # Entrada de mensagem
         self.message_input = QLineEdit()
@@ -98,38 +94,42 @@ class ChatWindow(QMainWindow):
             return name
         return "Usuário"
 
-    def load_message_history(self):
-        if os.path.exists(self.message_history_file):
-            with open(self.message_history_file, "r") as file:
-                for line in file:
-                    self.display_message(line.strip(), False)
+    def load_message_history(self, contact_name):
+        file_path = os.path.join(self.message_history_dir, f"{contact_name}_history.txt")
+        messages = []
+        if os.path.exists(file_path):
+            with open(file_path, "r") as file:
+                messages = file.readlines()
+        return messages
 
-    def save_message(self, message):
-        with open(self.message_history_file, "a") as file:
+    def save_message(self, contact_name, message):
+        file_path = os.path.join(self.message_history_dir, f"{contact_name}_history.txt")
+        with open(file_path, "a") as file:
             file.write(message + "\n")
 
     def send_message(self):
         message = self.message_input.text()
-        dest_name = self.dest_selector.currentText()
-        dest_mac = self.nome_para_mac.get(dest_name, "")
-        
-        if message and dest_mac:
-            display_text = f"Você: {message}"
-            self.display_message(display_text, True)
-            self.save_message(display_text)
-            
-            # Formata e envia a mensagem como JSON para o servidor
-            data = json.dumps({"type": "message", "dest": dest_mac, "content": message}) + '\n'
-            self.client_socket.sendall(data.encode())
-            self.message_input.clear()
+        if message and self.active_chat:
+            dest_mac = self.nome_para_mac.get(self.active_chat, "")
+            if dest_mac:
+                display_text = f"Você: {message}"
+                self.display_message(self.active_chat, display_text, True)
+                self.save_message(self.active_chat, display_text)
 
-    def display_message(self, message, is_self=False):
+                # Formata e envia a mensagem como JSON para o servidor
+                data = json.dumps({"type": "message", "dest": dest_mac, "content": message}) + '\n'
+                self.client_socket.sendall(data.encode())
+                self.message_input.clear()
+
+    def display_message(self, contact_name, message, is_self=False):
+        # Encontra ou cria a aba de chat para o contato
+        tab = self.get_chat_tab(contact_name)
         if is_self:
             # Alinha mensagens enviadas à direita
-            self.message_display.append(f"<p style='color:blue; text-align:right;'>{message}</p>")
+            tab.append(f"<p style='color:blue; text-align:right;'>{message}</p>")
         else:
             # Alinha mensagens recebidas à esquerda
-            self.message_display.append(f"<p style='color:green; text-align:left;'>{message}</p>")
+            tab.append(f"<p style='color:green; text-align:left;'>{message}</p>")
 
     def receive_messages(self):
         buffer = ''
@@ -149,26 +149,76 @@ class ChatWindow(QMainWindow):
     def process_message(self, message):
         data = json.loads(message)
         
-        # Processa a lista de clientes conectados
         if data["type"] == "client_list":
             self.update_client_list(data["clients"])
         
-        # Processa mensagens diretas
         elif data["type"] == "message":
-            sender_name = next((name for name, mac in self.nome_para_mac.items() if mac == data["sender"]), data["sender"])
+            sender_mac = data["sender"]
+            sender_name = next((name for name, mac in self.nome_para_mac.items() if mac == sender_mac), sender_mac)
             display_text = f"{sender_name}: {data['content']}"
-            self.display_message(display_text)
-            self.save_message(display_text)
+            self.save_message(sender_name, display_text)
+
+            if sender_name != self.active_chat:
+                # Armazena a mensagem como não lida se a aba não estiver ativa
+                if sender_name not in self.pending_messages:
+                    self.pending_messages[sender_name] = []
+                self.pending_messages[sender_name].append(display_text)
+                self.unread_messages[sender_name] = True
+                self.update_client_list_display()
+            else:
+                self.display_message(sender_name, display_text)
 
     def update_client_list(self, clients):
+        self.nome_para_mac = {client["name"]: client["mac"] for client in clients if client["mac"] != self.mac_id}
+        self.update_client_list_display()
+
+    def update_client_list_display(self):
         self.client_list_widget.clear()
-        self.dest_selector.clear()
+        for name in self.nome_para_mac:
+            item_text = f"{name} (Novo)" if self.unread_messages.get(name) else name
+            self.client_list_widget.addItem(item_text)
+
+    def get_chat_tab(self, contact_name):
+        index = self.chat_tabs.indexOf(self.chat_tabs.findChild(QTextEdit, contact_name))
+        if index != -1:
+            return self.chat_tabs.widget(index)
+
+        # Criar nova aba se não existir
+        tab = QTextEdit()
+        tab.setReadOnly(True)
+        tab.setObjectName(contact_name)
+        self.chat_tabs.addTab(tab, contact_name)
+
+        # Carregar histórico na nova aba
+        messages = self.load_message_history(contact_name)
+        for message in messages:
+            self.display_message(contact_name, message.strip(), "Você:" in message)
+        return tab
+
+    def change_chat(self, item):
+        contact_name = item.text().replace(" (Novo)", "")
+        self.unread_messages[contact_name] = False
+        self.active_chat = contact_name
+        self.update_client_list_display()
+        self.chat_tabs.setCurrentWidget(self.get_chat_tab(contact_name))
         
-        for client in clients:
-            if client["mac"] != self.mac_id:
-                self.client_list_widget.addItem(client["name"])
-                self.dest_selector.addItem(client["name"])
-                self.nome_para_mac[client["name"]] = client["mac"]
+        # Exibir mensagens pendentes (não lidas) na aba ativa
+        if contact_name in self.pending_messages:
+            for msg in self.pending_messages[contact_name]:
+                self.display_message(contact_name, msg)
+            del self.pending_messages[contact_name]  # Limpar as mensagens pendentes
+
+    def switch_tab(self, index):
+        widget = self.chat_tabs.widget(index)
+        if widget:
+            self.active_chat = widget.objectName()
+            self.update_client_list_display()
+            
+            # Exibir mensagens pendentes ao mudar para a aba
+            if self.active_chat in self.pending_messages:
+                for msg in self.pending_messages[self.active_chat]:
+                    self.display_message(self.active_chat, msg)
+                del self.pending_messages[self.active_chat]  # Limpar as mensagens pendentes
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
